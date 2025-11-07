@@ -1,0 +1,223 @@
+(
+// Tape Loop / MPC-style sampler environment for SuperCollider
+// -----------------------------------------------------------
+// Drop this file into your startup folder or evaluate it manually.
+// It provides an interactive ~tapeLoop environment with helpers to
+// record, overdub, loop, and trigger pads with tempo-quantised timing.
+
+s.waitForBoot {
+    if(~tapeLoop.notNil) {
+        // Clean up a previous instance if the file gets re-evaluated.
+        try { ~tapeLoop.freeAll.() };
+    };
+
+    ~tapeLoop = IdentityDictionary.new;
+    ~tapeLoop.numPads = 8;        // how many virtual pads we have
+    ~tapeLoop.padLength = 8.0;    // seconds per pad buffer
+    ~tapeLoop.quant = 0.25;       // default quantisation grid (in beats)
+    ~tapeLoop.clock = TempoClock.new(120/60).permanent_(true);
+    ~tapeLoop.masterGroup = Group.head(s);
+    ~tapeLoop.fxGroup = Group.after(~tapeLoop.masterGroup);
+    ~tapeLoop.outputBus = 0;
+    ~tapeLoop.inputBus = Bus.audio(s, 2);
+
+    // Utility helpers ------------------------------------------------------
+    ~tapeLoop.resolveQuant = { |quant| 
+        switch(quant,
+            true, { ~tapeLoop.quant },
+            false, { nil },
+            nil, { nil },
+            { quant }
+        )
+    };
+
+    ~tapeLoop.schedule = { |func, quant=true|
+        var q = ~tapeLoop.resolveQuant.(quant);
+        if(q.isNil) {
+            func.value;
+        } {
+            var next = ~tapeLoop.clock.nextTimeOnGrid(q);
+            ~tapeLoop.clock.schedAbs(next, {
+                func.value;
+                nil;
+            });
+        };
+    };
+
+    ~tapeLoop.setTempo = { |bpm|
+        ~tapeLoop.clock.tempo = bpm / 60;
+    };
+
+    ~tapeLoop.setQuant = { |beats|
+        ~tapeLoop.quant = beats;
+    };
+
+    ~tapeLoop.status = {
+        "--- Tape Loop Status ---".postln;
+        ("Tempo: % bpm" % (~tapeLoop.clock.tempo * 60)).postln;
+        ("Quant grid: % beats" % (~tapeLoop.quant ?? { "(off)" })).postln;
+        ~tapeLoop.padState.do({ |state, idx|
+            var flag = state[\recorded].if({ "rec" }, { "-" });
+            var playing = state[\player].isNil.if({ "" }, { "playing" });
+            ("Pad %: % %" % [idx, flag, playing]).postln;
+        });
+        "--------------------------".postln;
+    };
+
+    // SynthDefs ------------------------------------------------------------
+    SynthDef(\tl_inputTap, { |outBus|
+        var sig = SoundIn.ar((0..1));
+        Out.ar(outBus, sig);
+    }).add;
+
+    SynthDef(\tl_recorder, { |bufnum, inBus, preLevel=0|
+        var sig = In.ar(inBus, 2);
+        RecordBuf.ar(sig, bufnum, loop: 0, preLevel: preLevel, doneAction: 2);
+    }).add;
+
+    SynthDef(\tl_player, { |out=0, bufnum, rate=1, startPos=0, amp=1, pan=0, loop=1, gate=1, fade=0.02|
+        var sig = PlayBuf.ar(2, bufnum, BufRateScale.kr(bufnum) * rate, startPos: startPos, loop: loop);
+        sig = Balance2.ar(sig[0], sig[1], pan);
+        sig = sig * amp;
+        sig = sig * EnvGen.kr(Env.asr(fade, 1, fade), gate, doneAction: 2);
+        Out.ar(out, sig);
+    }).add;
+
+    s.sync;
+
+    // Pad preparation ------------------------------------------------------
+    ~tapeLoop.setupPads = {
+        var frames = (s.sampleRate * ~tapeLoop.padLength).asInteger;
+        ~tapeLoop.buffers = Buffer.allocConsecutive(~tapeLoop.numPads, s, frames, 2);
+        s.sync;
+        ~tapeLoop.buffers.do(_.zero);
+        ~tapeLoop.padState = Array.fill(~tapeLoop.numPads, {
+            IdentityDictionary[
+                recorded: false,
+                player: nil
+            ]
+        });
+        s.sync;
+    };
+
+    ~tapeLoop.freePads = {
+        ~tapeLoop.padState.do({ |state|
+            state[\player].tryPerform(\set, \gate, 0);
+            state[\player].tryPerform(\free);
+        });
+        ~tapeLoop.buffers.do(_.free);
+        ~tapeLoop.padState = nil;
+        ~tapeLoop.buffers = nil;
+    };
+
+    ~tapeLoop.setupPads.();
+
+    // IO routing -----------------------------------------------------------
+    ~tapeLoop.listen = {
+        ~tapeLoop.inputTap.tryPerform(\free);
+        ~tapeLoop.inputTap = Synth.tail(~tapeLoop.masterGroup, \tl_inputTap, [\outBus, ~tapeLoop.inputBus]);
+    };
+
+    ~tapeLoop.stopListening = {
+        ~tapeLoop.inputTap.tryPerform(\free);
+        ~tapeLoop.inputTap = nil;
+    };
+
+    // Core actions ---------------------------------------------------------
+    ~tapeLoop.record = { |pad=0, quant=true, overdub=false, preLevel=0.7|
+        var action = {
+            var buf = ~tapeLoop.buffers[pad];
+            if(overdub.not) {
+                buf.zero;
+                s.sync;
+            };
+            ~tapeLoop.padState[pad][\player].tryPerform(\set, \gate, 0);
+            ~tapeLoop.padState[pad][\player].tryPerform(\free);
+            Synth.tail(~tapeLoop.masterGroup, \tl_recorder, [
+                \bufnum, buf.bufnum,
+                \inBus, ~tapeLoop.inputBus,
+                \preLevel, overdub.if({ preLevel }, { 0 })
+            ]);
+            ~tapeLoop.padState[pad][\recorded] = true;
+        };
+        ~tapeLoop.schedule.(action, quant);
+    };
+
+    ~tapeLoop.play = { |pad=0, quant=true, amp=1, rate=1, pan=0, loop=true|
+        var action = {
+            var buf = ~tapeLoop.buffers[pad];
+            if(~tapeLoop.padState[pad][\recorded].not) {
+                ("Pad % is empty" % pad).warn;
+            } {
+                ~tapeLoop.padState[pad][\player].tryPerform(\set, \gate, 0);
+                ~tapeLoop.padState[pad][\player].tryPerform(\free);
+                ~tapeLoop.padState[pad][\player] = Synth.tail(~tapeLoop.masterGroup, \tl_player, [
+                    \bufnum, buf.bufnum,
+                    \out, ~tapeLoop.outputBus,
+                    \amp, amp,
+                    \rate, rate,
+                    \pan, pan,
+                    \loop, loop.asInteger
+                ]);
+            };
+        };
+        ~tapeLoop.schedule.(action, quant);
+    };
+
+    ~tapeLoop.once = { |pad=0, quant=true, amp=1, rate=1, pan=0|
+        ~tapeLoop.play.(pad, quant, amp, rate, pan, false);
+    };
+
+    ~tapeLoop.stop = { |pad=0, quant=false|
+        var action = {
+            ~tapeLoop.padState[pad][\player].tryPerform(\set, \gate, 0);
+            ~tapeLoop.padState[pad][\player] = nil;
+        };
+        ~tapeLoop.schedule.(action, quant);
+    };
+
+    ~tapeLoop.clear = { |pad=0|
+        var buf = ~tapeLoop.buffers[pad];
+        buf.zero;
+        ~tapeLoop.padState[pad][\recorded] = false;
+        ~tapeLoop.stop.(pad, false);
+    };
+
+    ~tapeLoop.clearAll = {
+        ~tapeLoop.numPads.do({ |i| ~tapeLoop.clear.(i) });
+    };
+
+    ~tapeLoop.freeAll = {
+        ~tapeLoop.stopListening.();
+        ~tapeLoop.freePads.();
+        ~tapeLoop.inputBus.free;
+        ~tapeLoop = nil;
+    };
+
+    // Example MIDI bindings -----------------------------------------------
+    ~tapeLoop.midiPads = { |deviceName, chan=0|
+        MIDIClient.init;
+        MIDIIn.connectAll;
+        ~tapeLoop._midiPads ?? { ~tapeLoop._midiPads = IdentityDictionary.new };
+        ~tapeLoop._midiPads.do({ |def| def.free });
+        ~tapeLoop._midiPads.clear;
+        ~tapeLoop.numPads.do({ |idx|
+            var note = 36 + idx;
+            ~tapeLoop._midiPads[note] = MIDIdef.noteOn(("pad_%" % idx).asSymbol, { |vel, num|
+                if(vel > 0) {
+                    if(~tapeLoop.padState[idx][\recorded].not) {
+                        ~tapeLoop.record.(idx);
+                    } {
+                        ~tapeLoop.play.(idx);
+                    };
+                } {
+                    ~tapeLoop.stop.(idx);
+                };
+            }, note, chan: chan, srcID: deviceName);
+        });
+        "MIDI pads mapped".postln;
+    };
+
+    "Tape loop sampler ready. Call ~tapeLoop.listen.() to monitor inputs.".postln;
+};
+)
