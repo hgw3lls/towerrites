@@ -1,6 +1,17 @@
-# TowerRites SuperCollider Tools
+# TowerRites Performance Toolkit
 
-This repository now includes a SuperCollider script that implements a tape-loop / MPC-style sampler environment. The script lives at [`supercollider/tape_loop_sampler.scd`](supercollider/tape_loop_sampler.scd) and exposes a `~tapeLoop` environment for quickly capturing, overdubbing, and triggering loops from a MIDI controller or the keyboard.
+This repository now includes tools for both the audio (SuperCollider) and visual (TouchDesigner) sides of the Tower Rites Itself project.
+
+## TouchDesigner network builder
+
+- Scripted network constructor for the Tower Rites Itself visuals lives at [`touchdesigner/tower_rites_setup.py`](touchdesigner/tower_rites_setup.py).
+- Run the module from a Text DAT inside TouchDesigner (set the DAT's `Language` to Python, point the `Module` parameter to `touchdesigner.tower_rites_setup`, and press `CTRL+R`) to instantiate a feedback-driven tower visual with audio-reactive controls.
+- The script creates a `towerRites` container with `controls`, `visuals`, and `output` sections, plus GLSL TOPs for bloom and chromatic dispersion.
+- Core control channels (feedback mix, audio drive, warp amount, bloom, chromatic shift, glitch gate, LFOs, and audio envelope) are exposed via a `master` Constant CHOP and downstream `modulation` Math CHOP so they can be exported to MIDI controllers or UI widgets.
+
+## SuperCollider tape-loop sampler
+
+The SuperCollider script that implements a tape-loop / MPC-style sampler environment lives at [`supercollider/tape_loop_sampler.scd`](supercollider/tape_loop_sampler.scd). It exposes a `~tapeLoop` environment for quickly capturing, overdubbing, and triggering loops from a MIDI controller or the keyboard.
 
 ## Features
 
