@@ -12,8 +12,8 @@ s.waitForBoot {
     };
 
     ~tapeLoop = IdentityDictionary.new;
-    ~tapeLoop.numPads = 8;        // how many virtual pads we have
-    ~tapeLoop.padLength = 8.0;    // seconds per pad buffer
+    ~tapeLoop.padDurations = [5, 15, 30];
+    ~tapeLoop.numPads = ~tapeLoop.padDurations.size; // how many virtual pads we have
     ~tapeLoop.quant = 0.25;       // default quantisation grid (in beats)
     ~tapeLoop.clock = TempoClock.new(120/60).permanent_(true);
     ~tapeLoop.masterGroup = Group.head(s);
@@ -59,7 +59,12 @@ s.waitForBoot {
         ~tapeLoop.padState.do({ |state, idx|
             var flag = state[\recorded].if({ "rec" }, { "-" });
             var playing = state[\player].isNil.if({ "" }, { "playing" });
-            ("Pad %: % %" % [idx, flag, playing]).postln;
+            var duration = state[\duration] ?? { ~tapeLoop.padDurations[idx] };
+            (
+                "Pad " ++ idx.asString ++
+                " (" ++ duration.asStringPrec(3) ++ "s): " ++
+                flag ++ " " ++ playing
+            ).postln;
         });
         "--------------------------".postln;
     };
@@ -75,11 +80,23 @@ s.waitForBoot {
         RecordBuf.ar(sig, bufnum, loop: 0, preLevel: preLevel, doneAction: 2);
     }).add;
 
-    SynthDef(\tl_player, { |out=0, bufnum, rate=1, startPos=0, amp=1, pan=0, loop=1, gate=1, fade=0.02|
-        var sig = PlayBuf.ar(2, bufnum, BufRateScale.kr(bufnum) * rate, startPos: startPos, loop: loop);
+    SynthDef(\tl_player, { |out=0, bufnum, rate=1, startPos=0, amp=1, pan=0, loop=1, gate=1, fade=0.02,
+        wow=0.003, flutter=0.001, saturation=1.3, hiss=-45.dbamp, tone=3800, dropRate=0.08, dropDepth=0.25|
+        var baseRate = BufRateScale.kr(bufnum) * rate;
+        var wowLfo = Lag.kr(LFNoise2.kr(0.2) * wow, 0.4);
+        var flutterLfo = LFNoise2.kr(5) * flutter;
+        var modRate = baseRate * (1 + wowLfo + flutterLfo);
+        var sig = PlayBuf.ar(2, bufnum, modRate, startPos: startPos, loop: loop);
+        var dropouts = Lag.kr(Dust.kr(dropRate) * dropDepth, 0.03).clip(0, 0.95);
+        var env = EnvGen.kr(Env.asr(fade, 1, fade), gate, doneAction: 2);
+        sig = sig * (1 - dropouts);
+        sig = sig * saturation;
+        sig = sig.tanh;
+        sig = LPF.ar(sig, tone.max(800));
         sig = Balance2.ar(sig[0], sig[1], pan);
         sig = sig * amp;
-        sig = sig * EnvGen.kr(Env.asr(fade, 1, fade), gate, doneAction: 2);
+        sig = sig * env;
+        sig = sig + (HPF.ar(WhiteNoise.ar(hiss), 2000) * env);
         Out.ar(out, sig);
     }).add;
 
@@ -87,14 +104,18 @@ s.waitForBoot {
 
     // Pad preparation ------------------------------------------------------
     ~tapeLoop.setupPads = {
-        var frames = (s.sampleRate * ~tapeLoop.padLength).asInteger;
-        ~tapeLoop.buffers = Buffer.allocConsecutive(~tapeLoop.numPads, s, frames, 2);
+        ~tapeLoop.buffers = Array.fill(~tapeLoop.numPads, { |idx|
+            var duration = ~tapeLoop.padDurations[idx];
+            var frames = (s.sampleRate * duration).asInteger;
+            Buffer.alloc(s, frames, 2);
+        });
         s.sync;
         ~tapeLoop.buffers.do(_.zero);
-        ~tapeLoop.padState = Array.fill(~tapeLoop.numPads, {
+        ~tapeLoop.padState = Array.fill(~tapeLoop.numPads, { |idx|
             IdentityDictionary[
                 recorded: false,
-                player: nil
+                player: nil,
+                duration: ~tapeLoop.padDurations[idx]
             ]
         });
         s.sync;
@@ -143,7 +164,8 @@ s.waitForBoot {
         ~tapeLoop.schedule.(action, quant);
     };
 
-    ~tapeLoop.play = { |pad=0, quant=true, amp=1, rate=1, pan=0, loop=true|
+    ~tapeLoop.play = { |pad=0, quant=true, amp=1, rate=1, pan=0, loop=true,
+        wow=0.003, flutter=0.001, saturation=1.3, hiss=-45.dbamp, tone=3800, dropRate=0.08, dropDepth=0.25|
         var action = {
             var buf = ~tapeLoop.buffers[pad];
             if(~tapeLoop.padState[pad][\recorded].not) {
@@ -157,15 +179,23 @@ s.waitForBoot {
                     \amp, amp,
                     \rate, rate,
                     \pan, pan,
-                    \loop, loop.asInteger
+                    \loop, loop.asInteger,
+                    \wow, wow,
+                    \flutter, flutter,
+                    \saturation, saturation,
+                    \hiss, hiss,
+                    \tone, tone,
+                    \dropRate, dropRate,
+                    \dropDepth, dropDepth
                 ]);
             };
         };
         ~tapeLoop.schedule.(action, quant);
     };
 
-    ~tapeLoop.once = { |pad=0, quant=true, amp=1, rate=1, pan=0|
-        ~tapeLoop.play.(pad, quant, amp, rate, pan, false);
+    ~tapeLoop.once = { |pad=0, quant=true, amp=1, rate=1, pan=0,
+        wow=0.003, flutter=0.001, saturation=1.3, hiss=-45.dbamp, tone=3800, dropRate=0.08, dropDepth=0.25|
+        ~tapeLoop.play.(pad, quant, amp, rate, pan, false, wow, flutter, saturation, hiss, tone, dropRate, dropDepth);
     };
 
     ~tapeLoop.stop = { |pad=0, quant=false|
