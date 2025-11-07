@@ -3,8 +3,10 @@
 This module exposes a :func:`build` helper that can be run from a Text DAT
 inside TouchDesigner to programmatically assemble the core network for the
 "Tower Rites Itself" project.  The resulting network focuses on sculptural
-feedback-driven visuals with audio reactive modulation and a preset control
-layer for live performance tweaking.
+feedback-driven visuals with audio reactive modulation, a preset control
+layer for live performance tweaking, and a generative media block that
+streams AI-generated imagery and film-textured archival footage into the
+feedback loop.
 
 Example usage inside TouchDesigner::
 
@@ -79,7 +81,7 @@ def build(root: Optional["COMP"] = None) -> "COMP":
     tower.store("controls", controls)
     tower.store("visuals", visuals)
     tower.store("output", output)
-    tower.store("build_version", "2024-06-14")
+    tower.store("build_version", "2024-06-20")
 
     return tower
 
@@ -107,12 +109,18 @@ def _build_controls(ctrl: "COMP") -> None:
     master.par.value3 = 0.5  # bloom amount
     master.par.value4 = 0.2  # chromatic shift
     master.par.value5 = 0.0  # glitch gate
+    master.par.value6 = 0.35  # ai blend
+    master.par.value7 = 0.45  # archive blend
+    master.par.value8 = 0.55  # film wear
     master.par.name0 = "feedback_mix"
     master.par.name1 = "audio_drive"
     master.par.name2 = "warp_amount"
     master.par.name3 = "bloom"
     master.par.name4 = "chromatic"
     master.par.name5 = "glitch_gate"
+    master.par.name6 = "ai_blend"
+    master.par.name7 = "archive_blend"
+    master.par.name8 = "film_wear"
 
     # Audio input chain
     audio = setup.create(nullCHOP, "audio")
@@ -151,6 +159,19 @@ def _build_controls(ctrl: "COMP") -> None:
     merge.par.channame7 = "audio_env"
     merge.par.channame8 = "lfo_slow"
     merge.par.channame9 = "lfo_fast"
+    merge.par.channame10 = "ai_blend"
+    merge.par.channame11 = "archive_blend"
+    merge.par.channame12 = "film_wear"
+
+    # Store a default generative prompt table for the AI driver to use.
+    prompts = setup.create(tableDAT, "prompts")
+    prompts.clear()
+    prompts.appendRow(["key", "prompt"])
+    prompts.appendRow(["base_prompt", "tower rites itself, brutalist scaffolding, decaying ritual architecture, archival newspaper ink bleeding, cinematic, dusk light"])
+    prompts.appendRow(["alt_prompt", "tower rites itself, documentary fragments, analogue collage, machine hallucination, fractured lens bokeh"])
+    prompts.par.edit = True
+
+    ctrl.store("prompts", prompts)
 
     ctrl.store("master", master)
     ctrl.store("audio", audio)
@@ -169,6 +190,24 @@ def _build_visuals(vis: "COMP", controls: "COMP") -> None:
 
     for child in list(vis.children):
         child.destroy()
+
+    ai_output = _build_ai_generator(vis, controls)
+
+    archival_video = vis.create(moviefileinTOP, "archivalVideo")
+    archival_video.par.file = "./media/archival/tower_press_video.mp4"
+    archival_video.par.reload = True
+    archival_video.par.play = True
+    archival_video.par.rate = 0.95
+    archival_video.par.loop = True
+
+    archival_still = vis.create(moviefileinTOP, "archivalStill")
+    archival_still.par.file = "./media/archival/tower_press_still.jpg"
+    archival_still.par.reload = True
+    archival_still.par.play = False
+
+    archival_mix = vis.create(crossTOP, "archivalMix")
+    archival_mix.inputs = [archival_video, archival_still]
+    archival_mix.par.blend = 0.4
 
     # Base geometry using feedback network.
     ramp = vis.create(rampTOP, "heightRamp")
@@ -206,8 +245,16 @@ def _build_visuals(vis: "COMP", controls: "COMP") -> None:
     comp.par.op = "add"
     comp.par.preadd = 0.4
 
+    ai_cross = vis.create(crossTOP, "aiCross")
+    ai_cross.inputs = [comp, ai_output]
+    ai_cross.par.blend = 0.2
+
+    archive_cross = vis.create(crossTOP, "archiveCross")
+    archive_cross.inputs = [ai_cross, archival_mix]
+    archive_cross.par.blend = 0.3
+
     glitch_switch = vis.create(levelTOP, "glitchSwitch")
-    glitch_switch.inputs = [comp]
+    glitch_switch.inputs = [archive_cross]
     glitch_switch.par.brightness = 0.95
 
     glitch = vis.create(lookupTOP, "glitch")
@@ -228,6 +275,11 @@ def _build_visuals(vis: "COMP", controls: "COMP") -> None:
     chroma.par.pixelcode = CHROMA_GLSL
     chroma.par.resolutionmenu = "frominput"
 
+    film = vis.create(glslTOP, "filmTexture")
+    film.inputs = [chroma]
+    film.par.pixelcode = FILM_GLSL
+    film.par.resolutionmenu = "frominput"
+
     vis.store("ramp", ramp)
     vis.store("noise", noise)
     vis.store("level", level)
@@ -235,9 +287,16 @@ def _build_visuals(vis: "COMP", controls: "COMP") -> None:
     vis.store("feedback", feedback)
     vis.store("transform", xform)
     vis.store("composite", comp)
+    vis.store("ai_cross", ai_cross)
+    vis.store("archival_cross", archive_cross)
     vis.store("glitch", glitch)
     vis.store("bloom", bloom)
     vis.store("chromatic", chroma)
+    vis.store("film", film)
+    vis.store("archival_mix", archival_mix)
+    vis.store("archival_video", archival_video)
+    vis.store("archival_still", archival_still)
+    vis.store("ai_output", ai_output)
 
     _wire_visual_parameters(vis, controls)
 
@@ -246,7 +305,6 @@ def _wire_visual_parameters(vis: "COMP", controls: "COMP") -> None:
     """Connect control channels to TOP parameter expressions."""
     mods = controls.fetch("modulation")
     master = controls.fetch("master")
-    envelope = controls.fetch("envelope")
     lfo_slow = controls.fetch("lfo_slow")
     lfo_fast = controls.fetch("lfo_fast")
 
@@ -256,6 +314,10 @@ def _wire_visual_parameters(vis: "COMP", controls: "COMP") -> None:
     glitch = vis.fetch("glitch")
     bloom = vis.fetch("bloom")
     chroma = vis.fetch("chromatic")
+    film = vis.fetch("film")
+    ai_cross = vis.fetch("ai_cross")
+    archive_cross = vis.fetch("archival_cross")
+    archival_mix = vis.fetch("archival_mix")
 
     feedback.par.feedback = "op('{}')['feedback_mix']".format(master.path)
     transform.par.rotate = "0.06 + op('{}')['warp_amount'] * 12".format(mods.path)
@@ -276,6 +338,14 @@ def _wire_visual_parameters(vis: "COMP", controls: "COMP") -> None:
     chroma.par.par1 = "op('{}')['chromatic']".format(master.path)
     chroma.par.par2 = "op('{}')['audio_env']".format(mods.path)
 
+    ai_cross.par.blend = "clamp(op('{}')['ai_blend'], 0, 1)".format(master.path)
+    archive_cross.par.blend = "clamp(op('{}')['archive_blend'] + op('{}')['audio_env'] * 0.25, 0, 1)".format(master.path, mods.path)
+    archival_mix.par.blend = "clamp(0.35 + op('{}')['lfo_slow'] * 0.3, 0, 1)".format(mods.path)
+
+    film.par.pixelcode = FILM_GLSL
+    film.par.par1 = "op('{}')['film_wear']".format(master.path)
+    film.par.par2 = "op('{}')['audio_env']".format(mods.path)
+
 
 def _build_output(out: "COMP", visuals: "COMP") -> None:
     """Set up the final output chain."""
@@ -288,7 +358,7 @@ def _build_output(out: "COMP", visuals: "COMP") -> None:
         child.destroy()
 
     viewer = out.create(nullTOP, "final")
-    viewer.inputs = [visuals.fetch("chromatic")]
+    viewer.inputs = [visuals.fetch("film")]
     viewer.par.resolutionw = 1280
     viewer.par.resolutionh = 720
 
@@ -297,6 +367,224 @@ def _build_output(out: "COMP", visuals: "COMP") -> None:
     levels.par.brightness = 0.96
 
     out.store("output", levels)
+
+
+def _build_ai_generator(vis: "COMP", controls: "COMP") -> "TOP":
+    """Build the AI generative media driver and return its output TOP."""
+    ai = vis.create(baseCOMP, "aiGenerator")
+    ai.nodeWidth = 240
+    ai.nodeHeight = 160
+    ai.par.align = True
+    ai.par.alignorder = "lrbt"
+
+    if ai.children:
+        for child in list(ai.children):
+            child.destroy()
+
+    modulation = controls.fetch("modulation")
+    prompts = controls.fetch("prompts")
+
+    generated = ai.create(moviefileinTOP, "generated")
+    generated.par.file = "./media/generated/latest.png"
+    generated.par.reload = True
+    generated.par.play = False
+
+    null_out = ai.create(nullTOP, "out")
+    null_out.inputs = [generated]
+
+    driver = ai.create(textDAT, "driver")
+    driver.text = AI_DRIVER_SCRIPT
+
+    driver_exec = ai.create(datExecuteDAT, "driverExec")
+    driver_exec.par.dat = driver
+    driver_exec.par.frame = True
+    driver_exec.par.active = True
+
+    ai.store("audio_chop_path", modulation.path)
+    ai.store("feedback_chop_path", modulation.path)
+    ai.store("prompt_table", prompts.path)
+    ai.store("generated_top", generated.path)
+    ai.store("last_prompt_index", 0)
+    ai.store("prompt_seed", 0)
+    ai.store("enabled", True)
+    ai.store("endpoint", "http://127.0.0.1:7860/sdapi/v1/img2img")
+    ai.store("interval", 8.0)
+
+    return null_out
+
+
+AI_DRIVER_SCRIPT = """\
+\"\"\"DAT Execute script that fetches generative imagery for Tower Rites.\"\"\"
+import base64
+import os
+import random
+import time
+
+import requests
+
+MEDIA_NAME = os.path.join('media', 'generated', 'latest.png')
+
+
+def _ensure_media_path(project_folder):
+    path = os.path.join(project_folder, MEDIA_NAME)
+    folder = os.path.dirname(path)
+    if not os.path.isdir(folder):
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception:
+            pass
+    return path
+
+
+def _build_prompt(comp):
+    table_path = comp.fetch('prompt_table', '')
+    prompt_dat = op(table_path) if table_path else None
+    if prompt_dat is None:
+        return "tower rites itself, analogue dream"
+
+    prompts = []
+    for row in prompt_dat.rows():
+        if len(row) < 2 or row[0].val == 'key':
+            continue
+        prompts.append(row[1].val)
+
+    if not prompts:
+        return "tower rites itself, analogue dream"
+
+    last_index = comp.fetch('last_prompt_index', 0)
+    if last_index >= len(prompts):
+        last_index = 0
+
+    # Occasionally rotate prompts when the audio envelope spikes.
+    audio = _fetch_audio(comp)
+    if audio > 0.75:
+        last_index = (last_index + 1) % len(prompts)
+
+    comp.store('last_prompt_index', last_index)
+    return prompts[last_index]
+
+
+def _fetch_audio(comp):
+    audio_path = comp.fetch('audio_chop_path', '')
+    audio_chop = op(audio_path) if audio_path else None
+    if audio_chop is None:
+        return 0.0
+    try:
+        names = getattr(audio_chop, 'chanNames', [])
+        chan = audio_chop['audio_env'] if 'audio_env' in names else audio_chop[0]
+        return max(0.0, float(chan[0]))
+    except Exception:
+        return 0.0
+
+
+def _fetch_feedback(comp):
+    fb_path = comp.fetch('feedback_chop_path', '')
+    fb_chop = op(fb_path) if fb_path else None
+    if fb_chop is None:
+        return 0.0
+    try:
+        names = getattr(fb_chop, 'chanNames', [])
+        chan = fb_chop['feedback_mix'] if 'feedback_mix' in names else fb_chop[0]
+        return max(0.0, float(chan[0]))
+    except Exception:
+        return 0.0
+
+
+def _grab_archival_frame(comp, target_path):
+    parent_comp = comp.parent()
+    archive_top = parent_comp.fetch('archival_video', None)
+    still_top = parent_comp.fetch('archival_still', None)
+    source = archive_top if archive_top is not None else still_top
+    if source is None:
+        return None
+
+    try:
+        source.save(target_path, createFolders=True)
+        with open(target_path, 'rb') as handle:
+            return base64.b64encode(handle.read()).decode('utf-8')
+    except Exception:
+        return None
+
+
+def onFrameStart(frame):
+    comp = me.parent()
+    if not comp.fetch('enabled', True):
+        return
+
+    base_interval = float(comp.fetch('interval', 8.0))
+    audio_env = _fetch_audio(comp)
+    effective_interval = max(2.0, base_interval - audio_env * 4.5)
+
+    now = time.time()
+    last_update = comp.fetch('last_update', 0.0)
+    if now - last_update < effective_interval:
+        return
+
+    endpoint = comp.fetch('endpoint', '')
+    if not endpoint:
+        return
+
+    prompt = _build_prompt(comp)
+    feedback_level = _fetch_feedback(comp)
+
+    project_folder = project.folder
+    target_path = _ensure_media_path(project_folder)
+    init_path = os.path.join(project_folder, 'media', 'generated', 'init_source.png')
+    init_image = _grab_archival_frame(comp, init_path)
+
+    payload = {
+        'prompt': '{} :: memory recursion {}'.format(prompt, int(audio_env * 100)),
+        'cfg_scale': 6.0 + feedback_level * 6.0,
+        'steps': 30,
+        'width': 1280,
+        'height': 720,
+        'seed': random.randint(0, 2 ** 31 - 1),
+        'sampler_index': 'Euler a',
+        'denoising_strength': min(0.9, 0.35 + audio_env * 0.45),
+        'tiling': False,
+        'negative_prompt': 'watermark, oversaturated, jpeg artifacts, disfigured, missing detail'
+    }
+
+    if init_image is not None:
+        payload['init_images'] = [init_image]
+
+    try:
+        response = requests.post(endpoint, json=payload, timeout=35)
+        response.raise_for_status()
+    except Exception as err:
+        print('AI driver request failed: {}'.format(err))
+        comp.store('last_update', now)
+        return
+
+    data = response.json()
+    images = data.get('images') if isinstance(data, dict) else None
+    if not images:
+        comp.store('last_update', now)
+        return
+
+    encoded = images[0]
+    if encoded.startswith('data:'):
+        encoded = encoded.split(',', 1)[1]
+
+    try:
+        with open(target_path, 'wb') as output:
+            output.write(base64.b64decode(encoded))
+    except Exception as err:
+        print('Failed to write AI frame: {}'.format(err))
+        comp.store('last_update', now)
+        return
+
+    comp.store('last_update', now)
+
+    generated_path = comp.fetch('generated_top', '')
+    generated_top = op(generated_path) if generated_path else None
+    if generated_top is not None:
+        try:
+            generated_top.par.reloadpulse.pulse()
+        except Exception:
+            pass
+
+"""
 
 
 BLOOM_GLSL = """\
@@ -340,5 +628,45 @@ vec4 effect(vec4 color, sampler2D tex, vec2 uv, vec2 st)
     float b = texture(sTD2DInputs[0], uv + offsetB).b;
 
     return vec4(r, g, b, 1.0);
+}
+"""
+
+
+FILM_GLSL = """\
+vec3 hash(vec3 p)
+{
+    p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
+             dot(p, vec3(269.5, 183.3, 246.1)),
+             dot(p, vec3(113.5, 271.9, 124.6)));
+    return fract(sin(p) * 43758.5453);
+}
+
+
+vec4 effect(vec4 color, sampler2D tex, vec2 uv, vec2 st)
+{
+    float wear = clamp(uParm1.x, 0.0, 1.0);
+    float audio = clamp(uParm2.x, 0.0, 1.0);
+    vec4 base = texture(sTD2DInputs[0], uv);
+
+    float time = uTime * 0.75;
+    vec3 grain = hash(vec3(uv * uTD2DInfos[0].res.xy, time));
+    float flicker = sin(time * 6.0) * 0.08;
+
+    float vignette = smoothstep(1.2, 0.45, length(uv - vec2(0.5)));
+
+    float scratches = 0.0;
+    for (int i = -1; i <= 1; ++i)
+    {
+        vec2 coord = uv * uTD2DInfos[0].res.xy + vec2(float(i) * 0.5, time * 40.0);
+        scratches += smoothstep(0.98, 1.0, hash(vec3(coord, time * 0.1)).r);
+    }
+    scratches = clamp(scratches * 0.25, 0.0, 1.0);
+
+    vec3 worn = base.rgb + (grain - 0.5) * (0.35 + wear * 0.65);
+    worn += flicker * wear * 0.5;
+    worn = mix(worn, worn * vignette, 0.25 + wear * 0.35);
+    worn += scratches * wear * (0.15 + audio * 0.25);
+
+    return vec4(clamp(worn, 0.0, 1.0), base.a);
 }
 """

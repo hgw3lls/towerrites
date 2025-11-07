@@ -6,8 +6,18 @@ This repository now includes tools for both the audio (SuperCollider) and visual
 
 - Scripted network constructor for the Tower Rites Itself visuals lives at [`touchdesigner/tower_rites_setup.py`](touchdesigner/tower_rites_setup.py).
 - Run the module from a Text DAT inside TouchDesigner (set the DAT's `Language` to Python, point the `Module` parameter to `touchdesigner.tower_rites_setup`, and press `CTRL+R`) to instantiate a feedback-driven tower visual with audio-reactive controls.
-- The script creates a `towerRites` container with `controls`, `visuals`, and `output` sections, plus GLSL TOPs for bloom and chromatic dispersion.
-- Core control channels (feedback mix, audio drive, warp amount, bloom, chromatic shift, glitch gate, LFOs, and audio envelope) are exposed via a `master` Constant CHOP and downstream `modulation` Math CHOP so they can be exported to MIDI controllers or UI widgets.
+- The script creates a `towerRites` container with `controls`, `visuals`, and `output` sections, plus GLSL TOPs for bloom, chromatic dispersion, and a new film texture shader that adds grain, scratches, and vignette wear.
+- The visual chain folds in an AI media generator and an archival footage blend so the tower feedback loop can incorporate live-produced imagery, stills, and the historic Tower Press video feed.
+- Core control channels (feedback mix, audio drive, warp amount, bloom, chromatic shift, glitch gate, AI blend, archival blend, film wear, LFOs, and audio envelope) are exposed via a `master` Constant CHOP and downstream `modulation` Math CHOP so they can be exported to MIDI controllers or UI widgets.
+
+### Generative media workflow
+
+1. Place the Tower Press reference footage inside `media/archival/` (e.g. `tower_press_video.mp4` and `tower_press_still.jpg`) relative to the `.toe` project.
+2. Ensure the TouchDesigner Python environment has the `requests` package available (install via the built-in `pip` if necessary).
+3. Provide an AI image/video endpoint—by default the DAT Execute script targets a local Automatic1111/Stable Diffusion WebUI server (`http://127.0.0.1:7860/sdapi/v1/img2img`). Update `aiGenerator`'s storage values if you are using RunwayML, Replicate, ComfyUI, or another gateway.
+4. The `controls/setup/prompts` table DAT defines rotating prompt seeds. Modify/add rows to steer the hallucinations.
+5. Audio envelope spikes advance prompts, while the feedback mix modulates CFG scale and denoising. Generated frames land in `media/generated/latest.png` and are reloaded into the network automatically.
+6. Adjust the `ai_blend`, `archive_blend`, and `film_wear` channels (via the `master` Constant CHOP) to decide how prominently the generative textures, archival layers, and GLSL film wear appear in the composite.
 
 ## SuperCollider tape-loop sampler
 
