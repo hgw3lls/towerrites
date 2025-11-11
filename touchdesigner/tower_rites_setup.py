@@ -81,7 +81,7 @@ def build(root: Optional["COMP"] = None) -> "COMP":
     tower.store("controls", controls)
     tower.store("visuals", visuals)
     tower.store("output", output)
-    tower.store("build_version", "2024-06-20")
+    tower.store("build_version", "2024-07-10")
 
     return tower
 
@@ -112,6 +112,9 @@ def _build_controls(ctrl: "COMP") -> None:
     master.par.value6 = 0.35  # ai blend
     master.par.value7 = 0.45  # archive blend
     master.par.value8 = 0.55  # film wear
+    master.par.value9 = 0.985  # paint decay
+    master.par.value10 = 0.65  # paint drive multiplier
+    master.par.value11 = 6.0  # posterize steps
     master.par.name0 = "feedback_mix"
     master.par.name1 = "audio_drive"
     master.par.name2 = "warp_amount"
@@ -121,6 +124,9 @@ def _build_controls(ctrl: "COMP") -> None:
     master.par.name6 = "ai_blend"
     master.par.name7 = "archive_blend"
     master.par.name8 = "film_wear"
+    master.par.name9 = "paint_decay"
+    master.par.name10 = "paint_drive"
+    master.par.name11 = "posterize_steps"
 
     # Audio input chain
     audio = setup.create(nullCHOP, "audio")
@@ -162,6 +168,9 @@ def _build_controls(ctrl: "COMP") -> None:
     merge.par.channame10 = "ai_blend"
     merge.par.channame11 = "archive_blend"
     merge.par.channame12 = "film_wear"
+    merge.par.channame13 = "paint_decay"
+    merge.par.channame14 = "paint_drive"
+    merge.par.channame15 = "posterize_steps"
 
     # Store a default generative prompt table for the AI driver to use.
     prompts = setup.create(tableDAT, "prompts")
@@ -253,8 +262,15 @@ def _build_visuals(vis: "COMP", controls: "COMP") -> None:
     archive_cross.inputs = [ai_cross, archival_mix]
     archive_cross.par.blend = 0.3
 
+    paint_accum = vis.create(glslTOP, "paintAccum")
+    paint_accum.inputs = [feedback, archive_cross]
+    paint_accum.par.pixelcode = PAINT_ACCUM_GLSL
+    paint_accum.par.resolutionmenu = "frominput"
+
+    feedback.par.targetop = paint_accum
+
     glitch_switch = vis.create(levelTOP, "glitchSwitch")
-    glitch_switch.inputs = [archive_cross]
+    glitch_switch.inputs = [paint_accum]
     glitch_switch.par.brightness = 0.95
 
     glitch = vis.create(lookupTOP, "glitch")
@@ -289,6 +305,7 @@ def _build_visuals(vis: "COMP", controls: "COMP") -> None:
     vis.store("composite", comp)
     vis.store("ai_cross", ai_cross)
     vis.store("archival_cross", archive_cross)
+    vis.store("paint_accum", paint_accum)
     vis.store("glitch", glitch)
     vis.store("bloom", bloom)
     vis.store("chromatic", chroma)
@@ -317,6 +334,7 @@ def _wire_visual_parameters(vis: "COMP", controls: "COMP") -> None:
     film = vis.fetch("film")
     ai_cross = vis.fetch("ai_cross")
     archive_cross = vis.fetch("archival_cross")
+    paint_accum = vis.fetch("paint_accum")
     archival_mix = vis.fetch("archival_mix")
 
     feedback.par.feedback = "op('{}')['feedback_mix']".format(master.path)
@@ -337,6 +355,11 @@ def _wire_visual_parameters(vis: "COMP", controls: "COMP") -> None:
     chroma.par.pixelcode = CHROMA_GLSL
     chroma.par.par1 = "op('{}')['chromatic']".format(master.path)
     chroma.par.par2 = "op('{}')['audio_env']".format(mods.path)
+
+    paint_accum.par.pixelcode = PAINT_ACCUM_GLSL
+    paint_accum.par.par1 = "clamp(op('{}')['paint_decay'], 0.9, 0.999)".format(master.path)
+    paint_accum.par.par2 = "clamp(op('{}')['paint_drive'], 0, 1.5) * op('{}')['audio_env']".format(master.path, mods.path)
+    paint_accum.par.par3 = "max(2, op('{}')['posterize_steps'])".format(master.path)
 
     ai_cross.par.blend = "clamp(op('{}')['ai_blend'], 0, 1)".format(master.path)
     archive_cross.par.blend = "clamp(op('{}')['archive_blend'] + op('{}')['audio_env'] * 0.25, 0, 1)".format(master.path, mods.path)
@@ -584,6 +607,145 @@ def onFrameStart(frame):
         except Exception:
             pass
 
+"""
+
+
+PAINT_ACCUM_GLSL = """\
+// Feedback accumulation shader that blends AI paint strokes with a film substrate.
+
+vec3 mod289(vec3 x)
+{
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+
+vec4 mod289(vec4 x)
+{
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+
+vec4 permute(vec4 x)
+{
+    return mod289(((x * 34.0) + 1.0) * x);
+}
+
+
+float snoise(vec3 v)
+{
+    const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
+    vec3 i = floor(v + dot(v, C.yyy));
+    vec3 x0 = v - i + dot(i, C.xxx);
+
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy;
+    vec3 x3 = x0 - 0.5;
+
+    i = mod289(i);
+    vec4 p = permute(permute(permute(i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+    vec4 j = p - 49.0 * floor(p * (1.0 / 49.0));
+
+    vec4 x_ = floor(j * (1.0 / 7.0));
+    vec4 y_ = floor(j - 7.0 * x_);
+
+    vec4 x = (x_ * (1.0 / 7.0)) + (1.0 / 14.0);
+    vec4 y = (y_ * (1.0 / 7.0)) + (1.0 / 14.0);
+    vec4 h = 1.0 - abs(x) - abs(y);
+
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+
+    vec4 s0 = floor(b0) * 2.0 + 1.0;
+    vec4 s1 = floor(b1) * 2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+
+    vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+    vec3 g0 = vec3(a0.xy, h.x);
+    vec3 g1 = vec3(a0.zw, h.y);
+    vec3 g2 = vec3(a1.xy, h.z);
+    vec3 g3 = vec3(a1.zw, h.w);
+
+    vec4 norm = inversesqrt(vec4(dot(g0, g0), dot(g1, g1), dot(g2, g2), dot(g3, g3)));
+    g0 *= norm.x;
+    g1 *= norm.y;
+    g2 *= norm.z;
+    g3 *= norm.w;
+
+    vec4 m = max(0.5 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    vec4 m2 = m * m;
+    vec4 m4 = m2 * m2;
+
+    vec4 px = vec4(dot(g0, x0), dot(g1, x1), dot(g2, x2), dot(g3, x3));
+    return 105.0 * dot(m4, px);
+}
+
+
+float rand(vec2 n)
+{
+    return fract(sin(dot(n, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+
+vec3 filmBase(vec2 uv, float time)
+{
+    float expo = 0.8 + 0.2 * snoise(vec3(uv * 0.5, time * 0.1));
+    float grain = (rand(uv * time * 120.0) - 0.5) * 0.12;
+    float d = length(uv - 0.5);
+    float vig = smoothstep(0.9, 0.3, d);
+    return vec3(expo * vig + grain);
+}
+
+
+vec2 wobblyUV(vec2 uv, float time)
+{
+    vec2 n = vec2(
+        snoise(vec3(uv * 2.0, time * 0.3)),
+        snoise(vec3(uv * 2.0 + 10.0, time * 0.31))
+    );
+    return uv + n * 0.002;
+}
+
+
+vec3 posterize(vec3 c, float steps)
+{
+    float s = max(1.0, steps);
+    return floor(c * s) / s;
+}
+
+
+vec4 effect(vec4 color, sampler2D tex, vec2 uv, vec2 st)
+{
+    float decay = clamp(uParm1.x, 0.0, 0.9995);
+    float paintAmt = clamp(uParm2.x, 0.0, 1.5);
+    float posterSteps = max(1.0, uParm3.x);
+
+    vec2 prevUV = wobblyUV(uv, uTime);
+    vec3 prevCol = texture(sTD2DInputs[0], prevUV).rgb;
+
+    vec4 paintSample = vec4(0.0);
+    if (TD_NUM_INPUTS > 1)
+    {
+        paintSample = texture(sTD2DInputs[1], uv);
+    }
+
+    float mask = clamp(paintSample.a, 0.0, 1.0);
+    vec3 faded = prevCol * decay;
+    vec3 paintCol = posterize(paintSample.rgb, posterSteps);
+    vec3 painted = mix(faded, paintCol, mask * paintAmt);
+
+    vec3 film = filmBase(uv, uTime);
+    vec3 finalCol = mix(film, painted, 0.6);
+
+    return vec4(clamp(finalCol, 0.0, 1.0), 1.0);
+}
 """
 
 
